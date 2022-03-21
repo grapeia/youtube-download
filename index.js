@@ -1,21 +1,45 @@
-async function getVideoConfig() {
-    html = await fetch(window.location.href)
-        .then((resp) => resp.text())
-        .then((text) => text);
-    startStr = "ytInitialPlayerResponse =";
-    start = html.indexOf(startStr) + startStr.length;
-    end = html.indexOf("};", start) + 1;
-    const json = JSON.parse(html.slice(start, end));
-    return json;
+async function ytgGetVideoConfig() {
+    return new Promise((resolve) => {
+        setTimeout(async () => {
+            const html = await ytgFetchContent();
+            startStr = "ytInitialPlayerResponse =";
+            start = html.indexOf(startStr) + startStr.length;
+            end = html.indexOf("};", start) + 1;
+            resolve(JSON.parse(html.slice(start, end)));
+        }, 1000);
+    });
 }
 
-//create function to return html body of download modal
-function downloadVideo({
+async function ytgSetDownloadURL(stream) {
+    if (stream.url) return stream.url;
+    if (typeof window.ytgWinDecipher !== "function") await ytgUpdateDecipherInstance(html);
+    const params = ytgGetParams(stream.signatureCipher || stream.cipher);
+    const url = new URL(params.url);
+    url.searchParams.set(params.sp ? params.sp : 'signature', ytgDecipher(params.s));
+    return url.toString();
+};
+
+function ytgGetParams(url) {
+    const params = {};
+    const parser = document.createElement('a');
+    parser.href = 'youtube.com?' + url;
+    const query = parser.search.substring(1);
+    const vars = query.split('&');
+    for (let i = 0; i < vars.length; i++) {
+        const pair = vars[i].split('=');
+        params[pair[0]] = decodeURIComponent(pair[1]);
+    }
+    return params;
+}
+
+function ytgDownloadVideo({
     title,
     videoFileName,
     url,
-    thumbnail
+    thumbnail,
+    cipher = false
 }) {
+    const hostname = window.location.hostname;
     const html = `
         <html>
             <head>
@@ -102,14 +126,12 @@ function downloadVideo({
                 </div>
                 <div class="progress-percentage">0%</div>
                 <script>
-                function download() {
+                function download(url) {
                     console.log("Downloading ${title}");
+                    const toGoUrl = url || "${url}";
                     const xhr = new XMLHttpRequest();
-                    xhr.open("GET", "${url}", true);
+                    xhr.open("GET", toGoUrl, true);
                     xhr.responseType = "blob";
-                    xhr.setRequestHeader("Origin", window.location.origin);
-                    xhr.setRequestHeader("Referer", window.location.href);
-                    xhr.setRequestHeader("User-Agent", navigator.userAgent);
                     xhr.onprogress = (e) => {
                         const percent = (e.loaded / e.total) * 100;
                         document.querySelector(".progress-bar").style.width = percent + "%";
@@ -124,25 +146,25 @@ function downloadVideo({
                             link.click();
                         }
                     };
-                    xhr.onerror = function () {
+                    xhr.onerror = function (error) {
                         console.log("Error downloading file.");
-                        fetch("${url}").then((response) => response.blob()).then((blob) => {
-                            const link = document.createElement("a");
-                            link.href = window.URL.createObjectURL(blob);
-                            link.download = "${videoFileName}";
-                            link.click();
-                        });
+                        console.log(error);
+                        document.querySelector(".progress-percentage").innerHTML = "Error downloading file. <br> Try with right click and select 'Save Link As'";
+                        document.querySelector(".progress-percentage").style.fontSize = "0.8em";
+                        document.querySelector(".progress").innerHTML = "<a href='${url}' download>Download</a>";
+                        document.querySelector(".progress a").style.fontSize = "1.5em";
+                                              
                     };
-                    xhr.send();
                     window.onbeforeunload = () => {
                         xhr.abort();
                     };
+                    xhr.send();
                 }
                 (() => { download(); })()
             </script>
             </body>
         </html >`;
-    var d = new Date();
+    const d = new Date();
     const popup = window.open(
         d,
         "_blank",
@@ -151,15 +173,15 @@ function downloadVideo({
     popup.document.write(html);
 }
 
-async function addButtonsToPlayerControls() {
-    const config = await getVideoConfig();
+async function ytgAddButtonsToPlayerControls() {
+    const config = await ytgGetVideoConfig();
     const includedControl = [];
     const streams = config.streamingData.adaptiveFormats.filter((format) => {
         const mustInclude = format.mimeType.includes("video/mp4") && [1080, 720, 480].includes(format.height) && !includedControl.includes(format.height);
         includedControl.push(format.height);
         return mustInclude;
     });
-    streams.forEach((stream) => {
+    streams.forEach(async (stream) => {
         const button = document.createElement("button");
         const videoFileName = `${config.videoDetails.title}-${stream.qualityLabel}.mp4`;
         const thumbnail =
@@ -171,12 +193,15 @@ async function addButtonsToPlayerControls() {
         button.className = "ytp-button ytp-download-button";
         button.style =
             "background-color: #fff; border: 1px solid #ccc; border-radius: 3px; color: #000; font-size: 11px; font-weight: bold; height: 24px; line-height: 24px; margin-left: 5px; padding: 0 10px;";
+
+        const url = await ytgSetDownloadURL(stream)
         button.onclick = () => {
-            downloadVideo({
+            ytgDownloadVideo({
                 title: config.videoDetails.title,
                 videoFileName,
-                url: stream.url,
-                thumbnail
+                url,
+                thumbnail,
+                cipher: !!stream.url
             });
         };
         const playButton = document.getElementsByClassName("ytp-time-display")[0];
@@ -189,21 +214,23 @@ async function addButtonsToPlayerControls() {
     select.className = "ytp-download-button";
     select.style =
         "background-color: #fff; border: 1px solid #ccc; border-radius: 3px; color: #000; font-size: 11px; font-weight: bold; height: 24px; line-height: 24px; margin-left: 5px; padding: 0 10px;";
-    select.onchange = () => {
+    select.onchange = async () => {
         const selectedStream = allStreams[select.value];
-        const videoFileName = `${config.videoDetails.title}-${isVideo(selectedStream) ? "video" + selectedStream.qualityLabel : "audio"}-${selectedStream.bitrate}kbps.${getFileExtension(selectedStream)}`;
+        const videoFileName = `${config.videoDetails.title}-${ytgIsVideo(selectedStream) ? "video" + selectedStream.qualityLabel : "audio"}-${selectedStream.bitrate}kbps.${ytgGetFileExtension(selectedStream)}`;
         const thumbnail =
             selectedStream.thumbnail ||
             config.videoDetails.thumbnail.thumbnails[
                 config.videoDetails.thumbnail.thumbnails.length - 1
             ].url;
-        downloadVideo({
+        const url = await ytgSetDownloadURL(selectedStream)
+        ytgDownloadVideo({
             title: config.videoDetails.title,
             videoFileName,
-            url: selectedStream.url,
-            thumbnail
+            url,
+            thumbnail,
+            cipher: !!selectedStream.url
         });
-    }
+    };
     const option = document.createElement("option");
     option.value = "";
     option.innerHTML = "All Streams download";
@@ -211,10 +238,10 @@ async function addButtonsToPlayerControls() {
     allStreams.forEach((stream, i) => {
         const option = document.createElement("option");
         option.value = i;
-        if (isVideo(stream))
-            option.innerHTML = getType(stream) + " - " + stream.qualityLabel + ", " + stream.fps + "fps, " + getReadableBitrate(stream);
+        if (ytgIsVideo(stream))
+            option.innerHTML = ytgGetType(stream) + " - " + stream.qualityLabel + ", " + stream.fps + "fps, " + ytgGetReadableBitrate(stream);
         else
-            option.innerHTML = getType(stream) + " - " + getReadableBitrate(stream);
+            option.innerHTML = ytgGetType(stream) + " - " + ytgGetReadableBitrate(stream);
         select.appendChild(option);
     });
 
@@ -223,23 +250,23 @@ async function addButtonsToPlayerControls() {
     nextButton2.parentNode.insertBefore(select, nextButton2.nextSibling);
 }
 
-function getType(stream) {
+function ytgGetType(stream) {
     return String(stream.mimeType.split(";")[0]).toUpperCase();
 }
 
-function isVideo(stream) {
-    return stream.mimeType.includes("video")
+function ytgIsVideo(stream) {
+    return stream.mimeType.includes("video");
 }
 
-function getFileExtension(stream) {
+function ytgGetFileExtension(stream) {
     return stream.mimeType.split(";")[0].split("/")[1];
 }
 
-function getAudioCodec(stream) {
+function ytgGetAudioCodec(stream) {
     return stream.mimeType.split(";")[1].split("=")[1].replace(`"`, "");
 }
 
-function getReadableBitrate(stream) {
+function ytgGetReadableBitrate(stream) {
     const bitrate = stream.bitrate;
     if (bitrate < 1000) {
         return bitrate + " Kbps";
@@ -248,16 +275,69 @@ function getReadableBitrate(stream) {
     }
 }
 
-function removeButtonsFromPlayerControls() {
+function ytgRemoveButtonsFromPlayerControls() {
     const buttons = document.getElementsByClassName("ytp-download-button");
     while (buttons.length > 0) {
         buttons[0].remove();
     }
 }
 
-function renew() {
-    removeButtonsFromPlayerControls();
-    addButtonsToPlayerControls();
-    document.addEventListener("yt-navigate-start", renew);
+function ytgBetweenText(content, left, right) {
+    let pos;
+    if (left instanceof RegExp) {
+        const match = content.match(left);
+        if (!match) { return ''; }
+        pos = match.index + match[0].length;
+    } else {
+        pos = content.indexOf(left);
+        if (pos === -1) { return ''; }
+        pos += left.length;
+    }
+    content = content.slice(pos);
+    pos = content.indexOf(right);
+    if (pos === -1) { return ''; }
+    content = content.slice(0, pos);
+    return content;
+};
+
+async function ytgFetchContent(url = window.location.href) {
+    return await fetch(url)
+        .then((resp) => resp.text())
+        .then((text) => text);
 }
-renew();
+
+async function ytgUpdateDecipherInstance(html) {
+    const htmlToParse = html || await ytgFetchContent();
+    const html5player = ytgGetPlayerJsUrl(htmlToParse);
+    const jsContent = await ytgFetchContent(html5player);
+    const functionName = ytgBetweenText(jsContent, `a.set("alr","yes");c&&(c=`, `(decodeURIC`);
+    const toEval = jsContent.replace(`${functionName}=function(a)`, `window.ytgWinDecipher=function(a)`).replace('_yt_player', 'grapsPlayer');
+    eval(toEval);
+}
+
+function ytgDecipher(s) {
+    return window.ytgWinDecipher(s);
+}
+
+function ytgGetPlayerJsUrl(html) {
+    const match = /<script\s+src="([^"]+)"(?:\s+type="text\/javascript")?\s+name="player_ias\/base"\s*>|"jsUrl":"([^"]+)"/.exec(html);
+    const path = match ? match[1] || match[2] : null;
+    return new URL(path, window.location.href).href;
+}
+
+function ytgCallProcess() {
+    ytgUpdateDecipherInstance();
+    ytgRemoveButtonsFromPlayerControls();
+    ytgAddButtonsToPlayerControls();
+}
+
+function ytgStartProcess() {
+    if (!window.location.href.includes("watch?v=")) {
+        setTimeout(ytgStartProcess, 1000);
+        return;
+    }
+    // listener event when youtube player is ready
+    document.addEventListener('yt-navigate-finish', ytgCallProcess);
+    ytgCallProcess();
+}
+ytgStartProcess();
